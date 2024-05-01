@@ -1,31 +1,15 @@
-import { readFileSync } from 'node:fs';
+import EventEmitter from 'node:events';
+import { createReadStream } from 'node:fs';
 import { FileReader } from './file-reader.interface.js';
-import { OfferRent } from '../../types/offer-rent.type.js';
-import { City } from '../../types/city.type.js';
-import { OfferType } from '../../types/offer-type.type.js';
-import { Amenities } from '../../types/amenities.type.js';
-import { User } from '../../types/user.type.js';
-import { Coordinates } from '../../types/coordinates.type.js';
+import { OfferRent, City, OfferType, Amenities } from '../../types/index.js';
 
-
-export class TSVFileReader implements FileReader {
-  private sourceData = '';
+export class TSVFileReader extends EventEmitter implements FileReader {
+  private CHUNK_SIZE = 16384;
 
   constructor(
     private readonly filename: string
-  ) {}
-
-  private validateSourceData(): void {
-    if (!this.sourceData) {
-      throw new Error('Нет данных');
-    }
-  }
-
-  private parseSourceDataToOffers(): OfferRent[] {
-    return this.sourceData
-      .split('\n')
-      .filter((row) => row.trim().length > 0)
-      .map((row) => this.parseRowToOffer(row));
+  ) {
+    super();
   }
 
   private parseRowToOffer(row: string): OfferRent {
@@ -61,38 +45,39 @@ export class TSVFileReader implements FileReader {
       city: city as City,
       previewImage,
       photo: photo.split(';'),
-      isPremium: !!isPremium,
-      isFavorite: !!isFavorite,
-      rating: this.parseToNumber(rating),
+      isPremium: isPremium === 'true',
+      isFavorite: isFavorite === 'true',
+      rating: parseFloat(rating),
       type: type as OfferType,
-      rooms: this.parseToNumber(rooms),
-      guests: this.parseToNumber(guests),
-      price: this.parseToNumber(price),
+      rooms: parseInt(rooms, 10),
+      guests: parseInt(guests, 10),
+      price: parseInt(price, 10),
       amenities: amenities.split(';') as Amenities[],
-      user: this.parseUser(userName, mail, avatar, password, isPro),
-      comments: this.parseToNumber(comments),
-      coordinates: this.parseCoordinates(latitude, longitude)
+      user: { name: userName, mail, avatar, password, isPro: isPro === 'true' },
+      comments: parseInt(comments, 10),
+      coordinates: { latitude, longitude }
     };
   }
 
-  private parseToNumber(string: string): number {
-    return Number.parseInt(string, 10);
-  }
+  public async read(): Promise<void> {
+    const readStream = createReadStream(this.filename, {
+      highWaterMark: this.CHUNK_SIZE,
+      encoding: 'utf-8'
+    });
 
-  private parseUser(name: string, mail: string, avatar: string, password: string, isPro: string): User {
-    return { name, mail, avatar, password, isPro: !!isPro };
-  }
+    let data = '';
+    let nextLinePosition = -1;
 
-  private parseCoordinates(latitude: string, longitude: string): Coordinates {
-    return { latitude, longitude};
-  }
+    for await (const chunk of readStream) {
+      data += chunk.toString();
 
-  public read(): void {
-    this.sourceData = readFileSync(this.filename, 'utf-8');
-  }
+      while ((nextLinePosition = data.indexOf('\n')) !== -1) {
+        const completeRow = data.slice(0, nextLinePosition);
+        data = data.slice(++nextLinePosition);
 
-  public toArray(): OfferRent[] {
-    this.validateSourceData();
-    return this.parseSourceDataToOffers();
+        const parsedOffer = this.parseRowToOffer(completeRow);
+        this.emit('read', parsedOffer);
+      }
+    }
   }
 }
